@@ -1,0 +1,101 @@
+
+import pygame
+import sys
+import time
+import numpy as np
+import argparse
+from config_handler import load_config
+from simulation import SpaceSimulation
+from renderer import Renderer
+
+def create_solar_system(sim):
+    # Sun
+    sim.add_body(mass=1000, pos=[0,0,0], vel=[0,0,0], radius=5, color=[1,1,0], name="Sun")
+    # Planet 1
+    sim.add_body(mass=1, pos=[40,0,0], vel=[0,0,5], radius=1.2, color=[0.2,0.6,1], name="Earth")
+    # Moon
+    sim.add_body(mass=0.01, pos=[44,0,0], vel=[0,0,6.5], radius=0.4, color=[0.7,0.7,0.7], name="Moon")
+    # Planet 2
+    sim.add_body(mass=2, pos=[80,0,0], vel=[0,0,3.5], radius=1.8, color=[1,0.3,0.1], name="Mars")
+
+def create_galaxy(sim):
+    params = sim.cfg['galaxy_params']
+    np.random.seed(42)
+    
+    # Central Black Hole
+    sim.add_body(mass=params['central_mass'], pos=[0,0,0], vel=[0,0,0], radius=3, color=[1,1,1], name="Core")
+    
+    for i in range(params['body_count']):
+        angle = np.random.uniform(0, 2 * np.pi)
+        dist = np.random.uniform(10, params['radius'])
+        
+        # Spiral distribution
+        pos = [
+            dist * np.cos(angle),
+            np.random.normal(0, params['thickness']),
+            dist * np.sin(angle)
+        ]
+        
+        # Orbital velocity: sqrt(GM/r)
+        v_mag = np.sqrt((sim.g * params['central_mass']) / dist)
+        vel = [
+            -v_mag * np.sin(angle),
+            0,
+            v_mag * np.cos(angle)
+        ]
+        
+        mass = np.random.uniform(*params['mass_range'])
+        sim.add_body(mass=mass, pos=pos, vel=vel, radius=0.3, color=np.random.rand(3))
+
+def main():
+    parser = argparse.ArgumentParser(description="3D N-Body Simulation")
+    parser.add_argument('--config', type=str, help='Path to JSON config')
+    args = parser.parse_args()
+
+    pygame.init()
+    cfg = load_config(args.config)
+    sim = SpaceSimulation(cfg)
+    
+    if cfg['simulation']['mode'] == "solar_system":
+        create_solar_system(sim)
+    else:
+        create_galaxy(sim)
+
+    renderer = Renderer(sim)
+    clock = pygame.time.Clock()
+    
+    print("Controls: [Space] Pause, [V] Switch Engine, [C] Reset Cam, Mouse Drag to Orbit")
+
+    running = True
+    while running:
+        start_time = time.perf_counter()
+        
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE: sim.paused = not sim.paused
+                if event.key == pygame.K_v: sim.switch_engine()
+        
+        renderer.handle_input()
+        sim.step()
+        
+        end_time = time.perf_counter()
+        fps = clock.get_稳定_fps() if hasattr(clock, 'get_稳定_fps') else clock.get_fps()
+        
+        stats = {
+            "fps": fps,
+            "bodies": len(sim.bodies),
+            "engine": "NumPy" if sim.use_numpy else "Naive",
+            "step_ms": (end_time - start_time) * 1000,
+            "collisions": sim.collision_count
+        }
+        
+        renderer.draw(stats)
+        pygame.display.set_caption(f"SpaceSim | Bodies: {stats['bodies']} | Engine: {stats['engine']} | Step: {stats['step_ms']:.2f}ms")
+        clock.tick(60)
+
+    pygame.quit()
+
+if __name__ == "__main__":
+    main()
