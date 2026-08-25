@@ -1,101 +1,991 @@
-
-import pygame
-import sys
-import time
-import numpy as np
-import argparse
-from config_handler import load_config
-from simulation import SpaceSimulation
-from renderer import Renderer
-
-def create_solar_system(sim):
-    # Sun
-    sim.add_body(mass=1000, pos=[0,0,0], vel=[0,0,0], radius=5, color=[1,1,0], name="Sun")
-    # Planet 1
-    sim.add_body(mass=1, pos=[40,0,0], vel=[0,0,5], radius=1.2, color=[0.2,0.6,1], name="Earth")
-    # Moon
-    sim.add_body(mass=0.01, pos=[44,0,0], vel=[0,0,6.5], radius=0.4, color=[0.7,0.7,0.7], name="Moon")
-    # Planet 2
-    sim.add_body(mass=2, pos=[80,0,0], vel=[0,0,3.5], radius=1.8, color=[1,0.3,0.1], name="Mars")
-
-def create_galaxy(sim):
-    params = sim.cfg['galaxy_params']
-    np.random.seed(42)
-    
-    # Central Black Hole
-    sim.add_body(mass=params['central_mass'], pos=[0,0,0], vel=[0,0,0], radius=3, color=[1,1,1], name="Core")
-    
-    for i in range(params['body_count']):
-        angle = np.random.uniform(0, 2 * np.pi)
-        dist = np.random.uniform(10, params['radius'])
-        
-        # Spiral distribution
-        pos = [
-            dist * np.cos(angle),
-            np.random.normal(0, params['thickness']),
-            dist * np.sin(angle)
-        ]
-        
-        # Orbital velocity: sqrt(GM/r)
-        v_mag = np.sqrt((sim.g * params['central_mass']) / dist)
-        vel = [
-            -v_mag * np.sin(angle),
-            0,
-            v_mag * np.cos(angle)
-        ]
-        
-        mass = np.random.uniform(*params['mass_range'])
-        sim.add_body(mass=mass, pos=pos, vel=vel, radius=0.3, color=np.random.rand(3))
-
-def main():
-    parser = argparse.ArgumentParser(description="3D N-Body Simulation")
-    parser.add_argument('--config', type=str, help='Path to JSON config')
-    args = parser.parse_args()
-
-    pygame.init()
-    cfg = load_config(args.config)
-    sim = SpaceSimulation(cfg)
-    
-    if cfg['simulation']['mode'] == "solar_system":
-        create_solar_system(sim)
-    else:
-        create_galaxy(sim)
-
-    renderer = Renderer(sim)
-    clock = pygame.time.Clock()
-    
-    print("Controls: [Space] Pause, [V] Switch Engine, [C] Reset Cam, Mouse Drag to Orbit")
-
-    running = True
-    while running:
-        start_time = time.perf_counter()
-        
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE: sim.paused = not sim.paused
-                if event.key == pygame.K_v: sim.switch_engine()
-        
-        renderer.handle_input()
-        sim.step()
-        
-        end_time = time.perf_counter()
-        fps = clock.get_稳定_fps() if hasattr(clock, 'get_稳定_fps') else clock.get_fps()
-        
-        stats = {
-            "fps": fps,
-            "bodies": len(sim.bodies),
-            "engine": "NumPy" if sim.use_numpy else "Naive",
-            "step_ms": (end_time - start_time) * 1000,
-            "collisions": sim.collision_count
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StellarSim 3D | Interactive N-Body Simulator</title>
+    <!-- 
+        StellarSim 3D - A Self-Contained N-Body Gravity Simulator
+        Physics: 3D Newtonian Gravity with Velocity Verlet Integration
+        Rendering: Three.js
+    -->
+    <style>
+        :root {
+            --bg-color: #050508;
+            --panel-bg: rgba(15, 15, 25, 0.85);
+            --accent: #3a86ff;
+            --text: #e0e0e0;
+            --border: rgba(255, 255, 255, 0.1);
         }
+
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: var(--bg-color);
+            color: var(--text);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* UI Overlays */
+        .overlay {
+            position: absolute;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        .panel {
+            pointer-events: auto;
+            background: var(--panel-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+            margin: 10px;
+        }
+
+        /* Left Control Panel */
+        #controls {
+            top: 0;
+            left: 0;
+            width: 320px;
+            max-height: calc(100vh - 40px);
+            overflow-y: auto;
+            font-size: 13px;
+        }
+
+        /* Right Stats Panel */
+        #stats-panel {
+            top: 0;
+            right: 0;
+            width: 220px;
+        }
+
+        /* Bottom Selection Info */
+        #selection-info {
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            min-width: 300px;
+            text-align: center;
+            display: none;
+        }
+
+        h2, h3 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 5px;
+        }
+
+        .row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        label {
+            flex: 1;
+        }
+
+        input[type="range"] {
+            flex: 1;
+            margin: 0 10px;
+        }
+
+        input[type="number"], select {
+            width: 60px;
+            background: #1a1a2e;
+            border: 1px solid var(--border);
+            color: white;
+            padding: 2px;
+            border-radius: 3px;
+        }
+
+        button {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: opacity 0.2s, transform 0.1s;
+            margin: 2px;
+        }
+
+        button:hover { opacity: 0.9; }
+        button:active { transform: scale(0.95); }
+        button.secondary { background: #4a4e69; }
+        button.danger { background: #e63946; }
+
+        .stat-val { font-family: 'Courier New', Courier, monospace; color: #00ffcc; }
         
-        renderer.draw(stats)
-        pygame.display.set_caption(f"SpaceSim | Bodies: {stats['bodies']} | Engine: {stats['engine']} | Step: {stats['step_ms']:.2f}ms")
-        clock.tick(60)
+        .tab-buttons { display: flex; margin-bottom: 10px; }
+        .tab-buttons button { flex: 1; font-size: 11px; }
 
-    pygame.quit()
+        .group-box {
+            border: 1px solid var(--border);
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+        }
 
-if __name__ == "__main__":
-    main()
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--accent); border-radius: 10px; }
+
+        #loading-screen {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: var(--bg-color);
+            display: flex; flex-direction: column;
+            justify-content: center; align-items: center;
+            z-index: 100;
+        }
+
+        .spinner {
+            width: 50px; height: 50px;
+            border: 5px solid var(--border);
+            border-top: 5px solid var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+    <div id="loading-screen">
+        <div class="spinner"></div>
+        <p>Initializing Universe...</p>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <!-- UI Overlay -->
+    <div class="overlay" id="controls">
+        <div class="panel">
+            <h2>StellarSim 3D</h2>
+            
+            <div class="tab-buttons">
+                <button onclick="ui.setTab('sim')">Simulation</button>
+                <button onclick="ui.setTab('galaxy')">Galaxy Gen</button>
+                <button onclick="ui.setTab('vis')">Visuals</button>
+            </div>
+
+            <div id="tab-sim">
+                <div class="row">
+                    <button id="btn-play-pause" onclick="sim.togglePause()">Pause</button>
+                    <button class="secondary" onclick="sim.reset()">Reset</button>
+                    <button class="secondary" onclick="ui.exportConfig()">Export</button>
+                </div>
+                <div class="row">
+                    <label>Preset:</label>
+                    <select id="select-preset" onchange="sim.loadPreset(this.value)">
+                        <option value="solar_system">Solar System</option>
+                        <option value="empty">Empty Space</option>
+                    </select>
+                </div>
+                <div class="group-box">
+                    <h3>Physics</h3>
+                    <div class="row">
+                        <label>Engine:</label>
+                        <select id="select-engine" onchange="sim.setEngine(this.value)">
+                            <option value="naive">Naive O(N²)</option>
+                            <option value="fast">Fast (Typed)</option>
+                        </select>
+                    </div>
+                    <div class="row">
+                        <label title="Simulation speed multiplier">Sim Speed:</label>
+                        <input type="range" id="range-speed" min="0.1" max="10" step="0.1" value="1">
+                        <span id="val-speed">1.0</span>
+                    </div>
+                    <div class="row">
+                        <label title="Time step per calculation">Timestep:</label>
+                        <input type="number" id="input-dt" value="0.01" step="0.001">
+                    </div>
+                    <div class="row">
+                        <label>Substeps:</label>
+                        <input type="number" id="input-substeps" value="1" min="1" max="20">
+                    </div>
+                    <div class="row">
+                        <label>G Constant:</label>
+                        <input type="number" id="input-g" value="1.0">
+                    </div>
+                    <div class="row">
+                        <label>Collisions:</label>
+                        <input type="checkbox" id="check-collisions" checked>
+                    </div>
+                </div>
+            </div>
+
+            <div id="tab-galaxy" style="display:none;">
+                <h3>Galaxy Generator</h3>
+                <div class="row">
+                    <label>Body Count:</label>
+                    <input type="number" id="gen-count" value="500" step="100">
+                </div>
+                <div class="row">
+                    <label>Radius:</label>
+                    <input type="number" id="gen-radius" value="50">
+                </div>
+                <div class="row">
+                    <label>Central Mass:</label>
+                    <input type="number" id="gen-mass" value="1000">
+                </div>
+                <div class="row">
+                    <label>Spiral Arms:</label>
+                    <input type="range" id="gen-spiral" min="0" max="10" step="1" value="3">
+                </div>
+                <button style="width:100%" onclick="sim.generateGalaxy()">Generate New Galaxy</button>
+            </div>
+
+            <div id="tab-vis" style="display:none;">
+                <h3>Visuals</h3>
+                <div class="row">
+                    <label>Show Trails:</label>
+                    <input type="checkbox" id="check-trails" checked>
+                </div>
+                <div class="row">
+                    <label>Trail Length:</label>
+                    <input type="number" id="input-trail-len" value="100" step="50">
+                </div>
+                <div class="row">
+                    <label>Labels:</label>
+                    <input type="checkbox" id="check-labels" checked>
+                </div>
+                <div class="row">
+                    <label>Grid:</label>
+                    <input type="checkbox" id="check-grid" checked onchange="renderer.toggleGrid(this.checked)">
+                </div>
+                <div class="row">
+                    <button class="secondary" onclick="renderer.resetCamera()">Reset Camera</button>
+                    <button id="btn-follow" class="secondary" onclick="renderer.toggleFollow()">Follow Focus</button>
+                </div>
+            </div>
+
+            <div class="group-box">
+                <button class="secondary" style="width:100%" onclick="ui.runBenchmark()">Run Performance Benchmark</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="overlay" id="stats-panel">
+        <div class="panel">
+            <h3>Statistics</h3>
+            <div class="row"><span>FPS:</span> <span class="stat-val" id="stat-fps">0</span></div>
+            <div class="row"><span>Bodies:</span> <span class="stat-val" id="stat-bodies">0</span></div>
+            <div class="row"><span>Physics:</span> <span class="stat-val" id="stat-physics-time">0 ms</span></div>
+            <div class="row"><span>Collisions:</span> <span class="stat-val" id="stat-collisions">0</span></div>
+            <div class="row"><span>Sim Time:</span> <span class="stat-val" id="stat-time">0.0</span></div>
+        </div>
+    </div>
+
+    <div class="overlay panel" id="selection-info">
+        <h3 id="sel-name">Body Name</h3>
+        <div class="row"><span>Mass:</span> <span id="sel-mass">0</span></div>
+        <div class="row"><span>Radius:</span> <span id="sel-radius">0</span></div>
+        <div class="row"><span>Speed:</span> <span id="sel-speed">0</span></div>
+        <button onclick="renderer.focusSelected()">Focus Camera</button>
+        <button class="danger" onclick="sim.deleteSelected()">Delete</button>
+    </div>
+
+    <!-- Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        /**
+         * PHYSICS CONSTANTS & CONFIG
+         */
+        const CONFIG = {
+            SOFTENING: 0.05, // Prevents infinite force at r=0
+            MAX_SUBSTEPS: 20,
+            TRAIL_RESOLUTION: 2
+        };
+
+        /**
+         * BODY CLASS
+         * Represents a single astronomical object
+         */
+        class Body {
+            constructor(params) {
+                this.id = Math.random().toString(36).substr(2, 9);
+                this.name = params.name || 'Unnamed Body';
+                this.mass = params.mass || 1;
+                this.radius = params.radius || 0.5;
+                this.color = params.color || 0xffffff;
+                
+                this.pos = new THREE.Vector3(...(params.pos || [0,0,0]));
+                this.vel = new THREE.Vector3(...(params.vel || [0,0,0]));
+                this.acc = new THREE.Vector3(0, 0, 0);
+
+                // For Velocity Verlet
+                this.prevAcc = new THREE.Vector3(0, 0, 0);
+
+                // Visuals
+                this.mesh = this.createMesh();
+                this.trail = [];
+                this.trailGeometry = null;
+                this.trailLine = null;
+                this.initTrail();
+            }
+
+            createMesh() {
+                const geo = new THREE.SphereGeometry(this.radius, 16, 16);
+                const mat = new THREE.MeshPhongMaterial({ 
+                    color: this.color,
+                    emissive: this.color,
+                    emissiveIntensity: 0.2
+                });
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.copy(this.pos);
+                mesh.userData.bodyId = this.id;
+                return mesh;
+            }
+
+            initTrail() {
+                const geometry = new THREE.BufferGeometry();
+                const maxPoints = 1000; // Cap
+                const positions = new Float32Array(maxPoints * 3);
+                geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                const material = new THREE.LineBasicMaterial({ 
+                    color: this.color, 
+                    transparent: true, 
+                    opacity: 0.4 
+                });
+                this.trailLine = new THREE.Line(geometry, material);
+                this.trailLine.frustumCulled = false;
+            }
+
+            updateTrail(maxLen, visible) {
+                if (!visible) {
+                    this.trailLine.visible = false;
+                    return;
+                }
+                this.trailLine.visible = true;
+                
+                this.trail.push(this.pos.x, this.pos.y, this.pos.z);
+                if (this.trail.length / 3 > maxLen) {
+                    this.trail.shift(); this.trail.shift(); this.trail.shift();
+                }
+
+                const attr = this.trailLine.geometry.attributes.position;
+                for (let i = 0; i < this.trail.length / 3; i++) {
+                    attr.array[i * 3] = this.trail[i * 3];
+                    attr.array[i * 3 + 1] = this.trail[i * 3 + 1];
+                    attr.array[i * 3 + 2] = this.trail[i * 3 + 2];
+                }
+                attr.needsUpdate = true;
+                this.trailLine.geometry.setDrawRange(0, this.trail.length / 3);
+            }
+
+            updateMesh() {
+                this.mesh.position.copy(this.pos);
+            }
+
+            destroy(scene) {
+                scene.remove(this.mesh);
+                scene.remove(this.trailLine);
+                this.mesh.geometry.dispose();
+                this.mesh.material.dispose();
+                this.trailLine.geometry.dispose();
+                this.trailLine.material.dispose();
+            }
+        }
+
+        /**
+         * PHYSICS ENGINES
+         */
+        class Physics {
+            // Naive O(N^2) Implementation
+            static calculateNaive(bodies, g, softening) {
+                const n = bodies.length;
+                // Reset accelerations
+                for (let i = 0; i < n; i++) {
+                    bodies[i].acc.set(0, 0, 0);
+                }
+
+                for (let i = 0; i < n; i++) {
+                    const b1 = bodies[i];
+                    for (let j = i + 1; j < n; j++) {
+                        const b2 = bodies[j];
+                        
+                        const dx = b2.pos.x - b1.pos.x;
+                        const dy = b2.pos.y - b1.pos.y;
+                        const dz = b2.pos.z - b1.pos.z;
+                        
+                        const distSq = dx*dx + dy*dy + dz*dz + softening;
+                        const dist = Math.sqrt(distSq);
+                        const force = (g * b1.mass * b2.mass) / (distSq * dist);
+
+                        const ax = force * dx;
+                        const ay = force * dy;
+                        const az = force * dz;
+
+                        // a = F/m
+                        b1.acc.x += ax / b1.mass;
+                        b1.acc.y += ay / b1.mass;
+                        b1.acc.z += az / b1.mass;
+
+                        b2.acc.x -= ax / b2.mass;
+                        b2.acc.y -= ay / b2.mass;
+                        b2.acc.z -= az / b2.mass;
+                    }
+                }
+            }
+
+            // Optimized TypedArray Engine
+            static calculateFast(bodies, g, softening) {
+                const n = bodies.length;
+                const pos = new Float64Array(n * 3);
+                const acc = new Float64Array(n * 3);
+                const mass = new Float64Array(n);
+
+                for (let i = 0; i < n; i++) {
+                    const b = bodies[i];
+                    pos[i*3] = b.pos.x; pos[i*3+1] = b.pos.y; pos[i*3+2] = b.pos.z;
+                    mass[i] = b.mass;
+                }
+
+                // Hot loop
+                for (let i = 0; i < n; i++) {
+                    const i3 = i * 3;
+                    const m1 = mass[i];
+                    const px = pos[i3], py = pos[i3+1], pz = pos[i3+2];
+
+                    for (let j = i + 1; j < n; j++) {
+                        const j3 = j * 3;
+                        const dx = pos[j3] - px;
+                        const dy = pos[j3+1] - py;
+                        const dz = pos[j3+2] - pz;
+
+                        const distSq = dx*dx + dy*dy + dz*dz + softening;
+                        const invDist3 = 1.0 / (distSq * Math.sqrt(distSq));
+                        const common = g * invDist3;
+
+                        const fX = common * dx;
+                        const fY = common * dy;
+                        const fZ = common * dz;
+
+                        // b1.acc += (G * m2 * distVec) / r^3
+                        acc[i3] += fX * mass[j];
+                        acc[i3+1] += fY * mass[j];
+                        acc[i3+2] += fZ * mass[j];
+
+                        // b2.acc -= (G * m1 * distVec) / r^3
+                        acc[j3] -= fX * m1;
+                        acc[j3+1] -= fY * m1;
+                        acc[j3+2] -= fZ * m1;
+                    }
+                }
+
+                for (let i = 0; i < n; i++) {
+                    bodies[i].acc.set(acc[i*3], acc[i*3+1], acc[i*3+2]);
+                }
+            }
+        }
+
+        /**
+         * MAIN SIMULATION CLASS
+         */
+        class Simulation {
+            constructor() {
+                this.bodies = [];
+                this.paused = false;
+                this.time = 0;
+                this.collisions = 0;
+                this.engineType = 'naive';
+                
+                this.g = 1.0;
+                this.dt = 0.01;
+                this.speed = 1.0;
+                this.substeps = 1;
+                this.collisionsEnabled = true;
+
+                this.lastPhysicsTime = 0;
+            }
+
+            update(uiState) {
+                if (this.paused || this.bodies.length === 0) return;
+
+                const startTime = performance.now();
+                
+                this.speed = uiState.speed;
+                this.dt = uiState.dt;
+                this.substeps = uiState.substeps;
+                this.g = uiState.g;
+                this.collisionsEnabled = uiState.collisionsEnabled;
+
+                const stepDt = (this.dt * this.speed) / this.substeps;
+
+                for (let s = 0; s < this.substeps; s++) {
+                    this.integrateVerlet(stepDt);
+                    if (this.collisionsEnabled) this.checkCollisions();
+                }
+
+                this.lastPhysicsTime = performance.now() - startTime;
+                this.time += this.dt * this.speed;
+            }
+
+            // Velocity Verlet Integration
+            integrateVerlet(dt) {
+                // 1. Half step velocity & full step position
+                for (let i = 0; i < this.bodies.length; i++) {
+                    const b = this.bodies[i];
+                    b.vel.x += 0.5 * b.acc.x * dt;
+                    b.vel.y += 0.5 * b.acc.y * dt;
+                    b.vel.z += 0.5 * b.acc.z * dt;
+
+                    b.pos.x += b.vel.x * dt;
+                    b.pos.y += b.vel.y * dt;
+                    b.pos.z += b.vel.z * dt;
+                    
+                    b.prevAcc.copy(b.acc);
+                }
+
+                // 2. Update acceleration based on new positions
+                if (this.engineType === 'fast') {
+                    Physics.calculateFast(this.bodies, this.g, CONFIG.SOFTENING);
+                } else {
+                    Physics.calculateNaive(this.bodies, this.g, CONFIG.SOFTENING);
+                }
+
+                // 3. Complete velocity step
+                for (let i = 0; i < this.bodies.length; i++) {
+                    const b = this.bodies[i];
+                    b.vel.x += 0.5 * b.acc.x * dt;
+                    b.vel.y += 0.5 * b.acc.y * dt;
+                    b.vel.z += 0.5 * b.acc.z * dt;
+                }
+            }
+
+            checkCollisions() {
+                for (let i = 0; i < this.bodies.length; i++) {
+                    for (let j = i + 1; j < this.bodies.length; j++) {
+                        const b1 = this.bodies[i];
+                        const b2 = this.bodies[j];
+                        
+                        const dist = b1.pos.distanceTo(b2.pos);
+                        if (dist < (b1.radius + b2.radius)) {
+                            this.mergeBodies(i, j);
+                            return; // One merge per frame to keep indices safe
+                        }
+                    }
+                }
+            }
+
+            mergeBodies(idx1, idx2) {
+                const b1 = this.bodies[idx1];
+                const b2 = this.bodies[idx2];
+                
+                const totalMass = b1.mass + b2.mass;
+                
+                // Conserve momentum: m1v1 + m2v2 = (m1+m2)v_final
+                const newVel = new THREE.Vector3()
+                    .addScaledVector(b1.vel, b1.mass)
+                    .addScaledVector(b2.vel, b2.mass)
+                    .divideScalar(totalMass);
+
+                // Mass-weighted position
+                const newPos = new THREE.Vector3()
+                    .addScaledVector(b1.pos, b1.mass)
+                    .addScaledVector(b2.pos, b2.mass)
+                    .divideScalar(totalMass);
+
+                // Heuristic for new radius (volume conservation approx)
+                const newRadius = Math.pow(Math.pow(b1.radius, 3) + Math.pow(b2.radius, 3), 1/3);
+
+                const mergedParams = {
+                    name: b1.mass > b2.mass ? b1.name : b2.name,
+                    mass: totalMass,
+                    radius: newRadius,
+                    pos: [newPos.x, newPos.y, newPos.z],
+                    vel: [newVel.x, newVel.y, newVel.z],
+                    color: b1.mass > b2.mass ? b1.color : b2.color
+                };
+
+                const mergedBody = new Body(mergedParams);
+                
+                // Clean up old
+                b1.destroy(renderer.scene);
+                b2.destroy(renderer.scene);
+                
+                // Splice out
+                this.bodies.splice(Math.max(idx1, idx2), 1);
+                this.bodies.splice(Math.min(idx1, idx2), 1);
+                
+                this.bodies.push(mergedBody);
+                renderer.scene.add(mergedBody.mesh);
+                renderer.scene.add(mergedBody.trailLine);
+                
+                this.collisions++;
+                
+                if (renderer.selectedBodyId === b1.id || renderer.selectedBodyId === b2.id) {
+                    renderer.selectedBodyId = mergedBody.id;
+                }
+            }
+
+            togglePause() {
+                this.paused = !this.paused;
+                document.getElementById('btn-play-pause').innerText = this.paused ? 'Play' : 'Pause';
+            }
+
+            reset() {
+                this.clear();
+                this.loadPreset(document.getElementById('select-preset').value);
+                this.time = 0;
+                this.collisions = 0;
+            }
+
+            clear() {
+                this.bodies.forEach(b => b.destroy(renderer.scene));
+                this.bodies = [];
+                renderer.selectedBodyId = null;
+            }
+
+            setEngine(type) {
+                this.engineType = type;
+            }
+
+            loadPreset(type) {
+                this.clear();
+                if (type === 'solar_system') {
+                    const data = [
+                        { name: 'Sun', mass: 1000, radius: 5, pos: [0,0,0], vel: [0,0,0], color: 0xffdd44 },
+                        { name: 'Mercury', mass: 0.1, radius: 0.4, pos: [10,0,0], vel: [0,0,10], color: 0xaaaaaa },
+                        { name: 'Venus', mass: 0.8, radius: 0.9, pos: [15,0,0], vel: [0,0,8.1], color: 0xe3bb76 },
+                        { name: 'Earth', mass: 1.0, radius: 1.0, pos: [22,0,0], vel: [0,0,6.7], color: 0x2277ff },
+                        { name: 'Mars', mass: 0.1, radius: 0.5, pos: [30,0,0], vel: [0,0,5.7], color: 0xff4422 },
+                        { name: 'Jupiter', mass: 300, radius: 2.5, pos: [50,0,0], vel: [0,0,4.4], color: 0xdf9577 },
+                        { name: 'Saturn', mass: 95, radius: 2.1, pos: [75,0,0], vel: [0,0,3.6], color: 0xead6b8 },
+                        { name: 'Uranus', mass: 14, radius: 1.5, pos: [100,0,0], vel: [0,0,3.1], color: 0xbbeeff },
+                        { name: 'Neptune', mass: 17, radius: 1.5, pos: [125,0,0], vel: [0,0,2.8], color: 0x3355ff }
+                    ];
+                    data.forEach(p => {
+                        const b = new Body(p);
+                        this.bodies.push(b);
+                        renderer.scene.add(b.mesh);
+                        renderer.scene.add(b.trailLine);
+                    });
+                    renderer.camera.position.set(0, 100, 150);
+                }
+            }
+
+            generateGalaxy() {
+                this.clear();
+                const count = parseInt(document.getElementById('gen-count').value);
+                const radius = parseFloat(document.getElementById('gen-radius').value);
+                const centralMass = parseFloat(document.getElementById('gen-mass').value);
+                const spiralArms = parseInt(document.getElementById('gen-spiral').value);
+                const g = parseFloat(document.getElementById('input-g').value);
+
+                // Core
+                const core = new Body({ name: 'Galactic Core', mass: centralMass, radius: radius * 0.08, pos: [0,0,0], vel: [0,0,0], color: 0xffffff });
+                this.bodies.push(core);
+                renderer.scene.add(core.mesh);
+                renderer.scene.add(core.trailLine);
+
+                for (let i = 0; i < count; i++) {
+                    const r = Math.pow(Math.random(), 0.5) * radius + 5;
+                    const angle = Math.random() * Math.PI * 2;
+                    
+                    // Spiral offset
+                    const spiralOffset = (spiralArms > 0) ? (r / radius) * spiralArms : 0;
+                    const finalAngle = angle + spiralOffset;
+
+                    const x = Math.cos(finalAngle) * r;
+                    const z = Math.sin(finalAngle) * r;
+                    const y = (Math.random() - 0.5) * (radius * 0.1) * (1 - r/radius);
+
+                    // Circular velocity: v = sqrt(GM/r)
+                    const vMag = Math.sqrt((g * centralMass) / r);
+                    const vx = -Math.sin(finalAngle) * vMag;
+                    const vz = Math.cos(finalAngle) * vMag;
+
+                    const b = new Body({
+                        name: 'Star ' + i,
+                        mass: Math.random() * 2,
+                        radius: 0.1 + Math.random() * 0.3,
+                        pos: [x, y, z],
+                        vel: [vx, 0, vz],
+                        color: new THREE.Color().setHSL(Math.random() * 0.1 + 0.55, 0.8, 0.8).getHex()
+                    });
+                    this.bodies.push(b);
+                    renderer.scene.add(b.mesh);
+                    renderer.scene.add(b.trailLine);
+                }
+                renderer.camera.position.set(0, radius * 1.5, radius * 1.5);
+            }
+
+            deleteSelected() {
+                if (!renderer.selectedBodyId) return;
+                const idx = this.bodies.findIndex(b => b.id === renderer.selectedBodyId);
+                if (idx !== -1) {
+                    this.bodies[idx].destroy(renderer.scene);
+                    this.bodies.splice(idx, 1);
+                    renderer.selectedBodyId = null;
+                }
+            }
+        }
+
+        /**
+         * RENDERER CLASS
+         * Handles Three.js scene, camera, and user interaction
+         */
+        class Renderer {
+            constructor() {
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 10000);
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setPixelRatio(window.devicePixelRatio);
+                document.getElementById('canvas-container').appendChild(this.renderer.domElement);
+
+                this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
+                this.controls.enableDamping = true;
+                this.controls.dampingFactor = 0.05;
+
+                this.camera.position.set(0, 100, 200);
+                
+                const ambient = new THREE.AmbientLight(0x404040, 1);
+                this.scene.add(ambient);
+                const sunLight = new THREE.PointLight(0xffffff, 1.5, 1000);
+                this.scene.add(sunLight);
+
+                this.grid = new THREE.GridHelper(500, 50, 0x333333, 0x111111);
+                this.scene.add(this.grid);
+
+                // Starfield
+                const starGeo = new THREE.BufferGeometry();
+                const starPos = [];
+                for(let i=0; i<10000; i++) {
+                    starPos.push((Math.random()-0.5)*4000, (Math.random()-0.5)*4000, (Math.random()-0.5)*4000);
+                }
+                starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
+                const starMat = new THREE.PointsMaterial({ color: 0x888888, size: 1 });
+                this.scene.add(new THREE.Points(starGeo, starMat));
+
+                this.selectedBodyId = null;
+                this.isFollowing = false;
+                this.raycaster = new THREE.Raycaster();
+                this.mouse = new THREE.Vector2();
+
+                window.addEventListener('resize', () => this.onResize());
+                this.renderer.domElement.addEventListener('mousedown', (e) => this.onMouseDown(e));
+            }
+
+            onResize() {
+                this.camera.aspect = window.innerWidth / window.innerHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+
+            onMouseDown(event) {
+                this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                this.raycaster.setFromCamera(this.mouse, this.camera);
+                
+                const intersects = this.raycaster.intersectObjects(sim.bodies.map(b => b.mesh));
+                if (intersects.length > 0) {
+                    this.selectedBodyId = intersects[0].object.userData.bodyId;
+                } else {
+                    // Do not deselect if UI clicked (handled by pointer-events)
+                }
+            }
+
+            update(showTrails, trailLen) {
+                sim.bodies.forEach(b => {
+                    b.updateMesh();
+                    b.updateTrail(trailLen, showTrails);
+                });
+
+                if (this.isFollowing && this.selectedBodyId) {
+                    const body = sim.bodies.find(b => b.id === this.selectedBodyId);
+                    if (body) {
+                        this.controls.target.copy(body.pos);
+                    } else {
+                        this.isFollowing = false;
+                    }
+                }
+
+                this.controls.update();
+                this.renderer.render(this.scene, this.camera);
+            }
+
+            focusSelected() {
+                if (!this.selectedBodyId) return;
+                const body = sim.bodies.find(b => b.id === this.selectedBodyId);
+                if (body) {
+                    this.controls.target.copy(body.pos);
+                }
+            }
+
+            toggleFollow() {
+                this.isFollowing = !this.isFollowing;
+                document.getElementById('btn-follow').classList.toggle('secondary');
+            }
+
+            resetCamera() {
+                this.controls.target.set(0,0,0);
+                this.camera.position.set(0, 100, 200);
+                this.isFollowing = false;
+            }
+
+            toggleGrid(visible) {
+                this.grid.visible = visible;
+            }
+        }
+
+        /**
+         * UI CONTROLLER
+         */
+        const ui = {
+            state: {
+                speed: 1,
+                dt: 0.01,
+                substeps: 1,
+                g: 1,
+                collisionsEnabled: true,
+                showTrails: true,
+                trailLen: 100,
+                showLabels: true
+            },
+
+            init() {
+                // Sync UI to state
+                document.getElementById('range-speed').addEventListener('input', (e) => {
+                    this.state.speed = parseFloat(e.target.value);
+                    document.getElementById('val-speed').innerText = this.state.speed.toFixed(1);
+                });
+
+                setInterval(() => this.updateStats(), 500);
+            },
+
+            update() {
+                this.state.dt = parseFloat(document.getElementById('input-dt').value) || 0;
+                this.state.substeps = parseInt(document.getElementById('input-substeps').value) || 1;
+                this.state.g = parseFloat(document.getElementById('input-g').value) || 0;
+                this.state.collisionsEnabled = document.getElementById('check-collisions').checked;
+                this.state.showTrails = document.getElementById('check-trails').checked;
+                this.state.trailLen = parseInt(document.getElementById('input-trail-len').value) || 0;
+                this.state.showLabels = document.getElementById('check-labels').checked;
+
+                this.updateSelectionPanel();
+            },
+
+            updateStats() {
+                document.getElementById('stat-fps').innerText = Math.round(1000 / (performance.now() - this.lastFrameTime || 1));
+                document.getElementById('stat-bodies').innerText = sim.bodies.length;
+                document.getElementById('stat-physics-time').innerText = sim.lastPhysicsTime.toFixed(2) + ' ms';
+                document.getElementById('stat-collisions').innerText = sim.collisions;
+                document.getElementById('stat-time').innerText = sim.time.toFixed(1);
+                this.lastFrameTime = performance.now();
+            },
+
+            updateSelectionPanel() {
+                const panel = document.getElementById('selection-info');
+                if (renderer.selectedBodyId) {
+                    const b = sim.bodies.find(body => body.id === renderer.selectedBodyId);
+                    if (b) {
+                        panel.style.display = 'block';
+                        document.getElementById('sel-name').innerText = b.name;
+                        document.getElementById('sel-mass').innerText = b.mass.toFixed(2);
+                        document.getElementById('sel-radius').innerText = b.radius.toFixed(2);
+                        document.getElementById('sel-speed').innerText = b.vel.length().toFixed(2);
+                        return;
+                    }
+                }
+                panel.style.display = 'none';
+            },
+
+            setTab(tab) {
+                ['sim', 'galaxy', 'vis'].forEach(t => {
+                    document.getElementById('tab-' + t).style.display = (t === tab) ? 'block' : 'none';
+                });
+            },
+
+            runBenchmark() {
+                const originalBodies = sim.bodies.length;
+                if (originalBodies < 10) {
+                    alert("Add more bodies (e.g. via Galaxy mode) to run a meaningful benchmark.");
+                    return;
+                }
+
+                sim.paused = true;
+                const iterations = 50;
+                
+                // Test Naive
+                const startNaive = performance.now();
+                for(let i=0; i<iterations; i++) Physics.calculateNaive(sim.bodies, sim.g, CONFIG.SOFTENING);
+                const endNaive = performance.now();
+
+                // Test Fast
+                const startFast = performance.now();
+                for(let i=0; i<iterations; i++) Physics.calculateFast(sim.bodies, sim.g, CONFIG.SOFTENING);
+                const endFast = performance.now();
+
+                const tNaive = (endNaive - startNaive) / iterations;
+                const tFast = (endFast - startFast) / iterations;
+
+                alert(`Benchmark Results (${originalBodies} bodies):\n\nNaive O(N²): ${tNaive.toFixed(3)}ms/step\nFast (Typed): ${tFast.toFixed(3)}ms/step\n\nSpeedup: ${(tNaive/tFast).toFixed(1)}x`);
+                sim.paused = false;
+            },
+
+            exportConfig() {
+                const config = {
+                    bodies: sim.bodies.map(b => ({
+                        name: b.name, mass: b.mass, radius: b.radius,
+                        pos: [b.pos.x, b.pos.y, b.pos.z],
+                        vel: [b.vel.x, b.vel.y, b.vel.z],
+                        color: b.color
+                    })),
+                    params: this.state
+                };
+                const blob = new Blob([JSON.stringify(config, null, 2)], {type: "application/json"});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = "sim_config.json";
+                a.click();
+            }
+        };
+
+        /**
+         * EXECUTION START
+         */
+        const sim = new Simulation();
+        const renderer = new Renderer();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            ui.update();
+            sim.update(ui.state);
+            renderer.update(ui.state.showTrails, ui.state.trailLen);
+        }
+
+        // Initialize and Start
+        window.onload = () => {
+            ui.init();
+            sim.loadPreset('solar_system');
+            document.getElementById('loading-screen').style.display = 'none';
+            animate();
+        };
+
+    </script>
+</body>
+</html>
